@@ -161,16 +161,32 @@ mainframe$Deaths.max <- 1 - mainframe$Deaths.max
 
 # Prediction algo simulation
 
-xgboost_sim <- function(data, decimal_odds, iterations){
+?xgb.train
+
+xgboost_sim <- function(data, decimal_odds, iterations, train_test_split, kelly_frac){
   
-  pathways <- list()
   eval <- data.frame()
+  pathways <- list()
+  raw_return <- list()
+  
+  t <- train_test_split
   
   for(i in 1:iterations){
     
-    train_sample <- sample(nrow(data), 0.5*nrow(data))
-    train <- data[train_sample, ]
-    test <- data[-train_sample, ]
+    if(i == 1){
+      
+      data <- data[order(data$ID),]
+      split <- ceiling(nrow(data) * t)
+      train <- data[1:split,]
+      test <- data[(1+split):nrow(data),]
+      
+    } else {
+      
+      train_sample <- sample(nrow(data), t*nrow(data))
+      train <- data[train_sample, ]
+      test <- data[-train_sample, ]
+      
+    }
     
     xgbtrain <- train[, -1]
     xgbtest <- test[, -1]
@@ -236,7 +252,7 @@ xgboost_sim <- function(data, decimal_odds, iterations){
     kelly <- apply(results[, 4:ncol(results)], 1, function(x){
       probs <- c(x[1], x[2])
       odds <- c(x[3], x[4])
-      output <- kelly_criterion(odds = odds, prob = probs, frac = 10)
+      output <- kelly_criterion(odds = odds, prob = probs, frac = kelly_frac)
       output <- round(output, 3)
       names(output) <- c('K1', 'K2')
       return(output)
@@ -269,38 +285,60 @@ xgboost_sim <- function(data, decimal_odds, iterations){
     })
     
     cumret <- cumprod(1 + returns) - 1
+    bets <- returns[!returns == 0]
+    bet_acc <- sum(sign(bets) == 1) / length(bets)
     
-    metrics <- data.frame(accuracy = xgbacc,
+    metrics <- data.frame(total_bets = length(bets),
+                          pred_accuracy = xgbacc,
+                          bet_accuracy = bet_acc,
                           return = as.numeric(cumret[length(cumret)]),
                           maximum = max(cumret),
                           mimum = min(cumret))
     
     eval <- rbind(eval, metrics)
     pathways[i] <- list(cumret)
+    raw_return[i] <- list(returns)
     
     print(i)
     
   }
   
-  output <- list(eval, pathways)
-  names(output) <- c('stats', 'pathways')
+  output <- list(eval, pathways, raw_return)
+  names(output) <- c('stats', 'pathways', 'return')
   return(output)
   
 }
 
+output <- xgboost_sim(data = mainframe, decimal_odds = decimal_odds, 
+                      iterations = 300, 
+                      train_test_split = 0.5,
+                      kelly_frac = 10)
 
-output <- xgboost_sim(data = mainframe, decimal_odds = decimal_odds, iterations = 300)
 stats <- output$stats
 pathways <- output$pathways
 pathways <- do.call(cbind, pathways)
+returns <- output$return
+returns <- do.call(cbind, returns)
 
-# Raw prediction Accuracy
-boxplot(stats$accuracy)
-mean(stats$accuracy)
+# Raw prediction accuracy
+boxplot(stats$pred_accuracy)
+mean(stats$pred_accuracy)
 
-# Accuracy vs return
-plot(stats$accuracy, stats$return, pch = 19)
+# Betting accuracy
+boxplot(stats$bet_accuracy)
+mean(stats$bet_accuracy)
+
+# Prediction accuracy vs return
+plot(stats$pred_accuracy, stats$return, pch = 19)
 abline(h = 0)
+
+# Bet accuracy vs return
+plot(stats$bet_accuracy, stats$return, pch = 19)
+abline(h = 0)
+
+# Prediction accuracy vs bet accuracy
+plot(stats$pred_accuracy, stats$bet_accuracy, pch = 19)
+cor(stats$pred_accuracy, stats$bet_accuracy)
 
 # Distribution of returns
 d <- density(stats$return)
@@ -315,12 +353,20 @@ risk <- ecdf(stats$return)
 risk(0)
 mean(stats$return)
 
+# Expected value per bet (arithmetic)
+mean(returns)
+# Sharpe ratio
+mean(stats$return) / sd(stats$return)
+
 # Plot all possible pathways
-plot(pathways[, 1], type = 'l', ylim = c(-1, max(stats$maximum)), col = 'gray')
+plot(1:nrow(pathways), type = 'n', ylim = c(-1, max(stats$maximum)), col = 'black')
 
 for(i in 2:ncol(pathways)){
   lines(pathways[, i], col = 'gray')
 }
+
+# OG
+lines(pathways[, 1], col = 'black')
 
 abline(h = 0, lwd = 1)
 abline(h = -1, lwd = 1, lty = 2)
@@ -354,3 +400,85 @@ lines(1:nrow(pathways),
 polygon(x = c(1:nrow(pathways), rev(1:nrow(pathways))), 
         y = c(path_mean - 2 * path_sd, rev(path_mean + 2 * path_sd)),
         col = adjustcolor('steelblue', alpha.f = .1), border = FALSE)
+
+
+# Simulate pathways
+simulate_pathways <- function(return_distribution, length_out, n){
+  
+  mu <- mean(return_distribution)
+  rd <- sd(return_distribution)
+  
+  output <- list()
+  
+  for(i in 1:n){
+    
+    simulated_returns <- rnorm(length_out, mu, rd)
+    pathway <- cumprod(1 + simulated_returns) - 1
+    output[i] <- list(pathway)
+    
+    print(i)
+    
+  }
+  
+  return(output)
+  
+}
+
+sim_paths <- simulate_pathways(return_distribution = returns[,2], 2000, 1000)
+sim_paths <- do.call(cbind, sim_paths)
+
+risk <- ecdf(sim_paths[nrow(sim_paths),])
+risk(0)
+mean(sim_paths[nrow(sim_paths),])
+
+d <- density(sim_paths[nrow(sim_paths),])
+plot(d, xlab = 'x', main = 'Distribution of returns', 
+     cex.lab = 0.8, cex.axis = 0.8)
+polygon(x = d$x, y = d$y,
+        col = adjustcolor('steelblue', alpha.f = .5), border = FALSE)
+abline(v = median(sim_paths[nrow(sim_paths),]))
+
+plot(sim_paths[,1], type = 'l', ylim = c(-2, max(sim_paths)), col = 'gray')
+for(i in 2:ncol(sim_paths)){
+  lines(sim_paths[, i], col = 'gray')
+}
+abline(h = 0, lwd = 1)
+abline(h = -1, lwd = 1, lty = 2)
+
+lines(1:nrow(sim_paths), 
+      seq(0, mean(sim_paths[nrow(sim_paths), ]), 
+          length.out = nrow(sim_paths)),
+      lty = 2, 
+      lwd = 2)
+
+path_mean <- rowMeans(sim_paths)
+path_sd <- apply(sim_paths, 1, sd)
+
+# Averaged pathway
+lines(1:nrow(sim_paths),
+      path_mean,
+      lwd = 2, 
+      col = 'steelblue')
+
+# 95% Confidence interval
+lines(1:nrow(sim_paths),
+      path_mean + 2 * path_sd,
+      lwd = 2, lty = 2,
+      col = 'steelblue')
+
+lines(1:nrow(sim_paths),
+      path_mean - 2 * path_sd,
+      lwd = 2, lty = 2,
+      col = 'steelblue')
+
+polygon(x = c(1:nrow(sim_paths), rev(1:nrow(sim_paths))), 
+        y = c(path_mean - 2 * path_sd, rev(path_mean + 2 * path_sd)),
+        col = adjustcolor('steelblue', alpha.f = .1), border = FALSE)
+
+
+
+
+
+
+
+
